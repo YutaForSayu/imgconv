@@ -756,9 +756,8 @@ func main() {
 	
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: strings.Join([]string{
-			"https://kcast.bani.biz.id",
-			"https://kcast.nvs.my.id",
-			"http://localhost:7700",
+			"https://imgcnv.tieich.eu.cc",
+			"https://react-ssr-spark.yukikiyuctm.workers.dev",
 		}, ","),
 		AllowCredentials: true,
 		AllowMethods: "GET,POST,OPTIONS",
