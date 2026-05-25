@@ -578,7 +578,7 @@ func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 	proxyCache[exportTaskID] = dlURL
 	proxyMu.Unlock()
 
-	finalURL := fmt.Sprintf("https://imgconv.bani.biz.id/task/%s/imgs/%s", exportTaskID, outputFilename)
+	finalURL := fmt.Sprintf("https://imgconv.tools.bani.biz.id/task/%s/imgs/%s", exportTaskID, outputFilename)
 
 	return FileResult{
 		URL: finalURL,
