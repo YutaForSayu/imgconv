@@ -758,7 +758,7 @@ func main() {
 		AllowOrigins: strings.Join([]string{
 			"https://kcast.bani.biz.id",
 			"https://kcast.nvs.my.id",
-			"http://localhost:8080",
+			"http://localhost:7700",
 		}, ","),
 		AllowCredentials: true,
 		AllowMethods: "GET,POST,OPTIONS",
