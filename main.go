@@ -85,12 +85,6 @@ type RouteDetail struct {
 	Desc   string `json:"desc"`
 }
 
-type ErrorResponse struct {
-    Status bool   `json:"Status"`
-    Code   int    `json:"Code"`
-    Error  string `json:"Error"`
-}
-
 func normalizeFormat(format string) string {
 	v := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(format), "."))
 	if alias, ok := formatAlias[v]; ok {
@@ -655,7 +649,7 @@ func handleProxy(c *fiber.Ctx) error {
 	filename := c.Params("filename")
 
 	if taskID == "" || filename == "" {
-		return c.Status(400).JSON(ErrorResponse{
+		return c.Status(400).JSON(fiber.Map{
 			"Status": false,
 			"Code":   400,
 			"Error":  "taskId dan filename wajib ada",
@@ -698,7 +692,7 @@ func handleProxy(c *fiber.Ctx) error {
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return c.Status(502).JSON(ErrorResponse{
+		return c.Status(502).JSON(fiber.Map{
 			"Status": false,
 			"Code":   502,
 			"Error":  "Gagal fetch file dari upstream: " + err.Error(),
@@ -707,7 +701,7 @@ func handleProxy(c *fiber.Ctx) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return c.Status(resp.StatusCode).JSON(ErrorResponse{
+		return c.Status(resp.StatusCode).JSON(fiber.Map{
 			"Status": false,
 			"Code":   resp.StatusCode,
 			"Error":  fmt.Sprintf("Upstream mengembalikan HTTP %d", resp.StatusCode),
@@ -725,7 +719,7 @@ func handleProxy(c *fiber.Ctx) error {
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return c.Status(500).JSON(ErrorResponse{
+		return c.Status(500).JSON(fiber.Map{
 			"Status": false,
 			"Code":   500,
 			"Error":  "Gagal membaca response upstream",
@@ -784,7 +778,7 @@ func main() {
 			return c.IP()
 		},
 		LimitReached: func(c *fiber.Ctx) error {
-			return c.Status(429).JSON(ErrorResponse{
+			return c.Status(429).JSON(fiber.Map{
 				"Status": false,
 				"Code":   429,
 				"Error":  "Rate limit tercapai. Maksimal 25 request per 15 detik.",
