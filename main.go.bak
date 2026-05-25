@@ -16,18 +16,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
-)
-
-var (
-	proxyCache = map[string]string{}
-	proxyMu    sync.RWMutex
 )
 
 const (
@@ -46,6 +39,8 @@ var formatAlias = map[string]string{
 	"tif": "tiff",
 }
 
+// ─── Models ───────────────────────────────────────────────────────────────────
+
 type ConvertRequest struct {
 	To      string `form:"to"`
 	Quality int    `form:"quality"`
@@ -62,34 +57,12 @@ type ConvertResponse struct {
 
 type FileResult struct {
 	URL         string `json:"Url"`
-	ProxyURL    string `json:"ProxyUrl,omitempty"`
 	Path        string `json:"Path,omitempty"`
 	Size        int64  `json:"Size,omitempty"`
 	ContentType string `json:"ContentType,omitempty"`
 }
 
-type ImageConverterResponse struct {
-	Service string `json:"service"`
-	Version string `json:"version"`
-	Routes  Routes `json:"routes"`
-}
-
-type Routes struct {
-	Convert   RouteDetail `json:"/convert"`
-	Formats   RouteDetail `json:"/formats"`
-	TaskProxy  RouteDetail `json:"/task/:taskId/imgs/:file"`
-}
-
-type RouteDetail struct {
-	Method string `json:"method"`
-	Desc   string `json:"desc"`
-}
-
-type ErrorResponse struct {
-    Status bool   `json:"Status"`
-    Code   int    `json:"Code"`
-    Error  string `json:"Error"`
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func normalizeFormat(format string) string {
 	v := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(format), "."))
@@ -150,6 +123,7 @@ func normalizeServer(rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Replace server<N>- prefix with s<N>-
 	host := u.Hostname()
 	port := u.Port()
 	newHost := host
@@ -166,6 +140,8 @@ func normalizeServer(rawURL string) (string, error) {
 	}
 	return origin, nil
 }
+
+// ─── API Calls ────────────────────────────────────────────────────────────────
 
 func createJob(from, to string) (map[string]interface{}, error) {
 	options := map[string]interface{}{
@@ -482,6 +458,8 @@ func contains(slice []string, val string) bool {
 	return false
 }
 
+// ─── Core Convert Logic ───────────────────────────────────────────────────────
+
 func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 	from := normalizeFormat(strings.TrimPrefix(filepath.Ext(origName), "."))
 	to = normalizeFormat(to)
@@ -519,6 +497,7 @@ func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 		strings.TrimPrefix(filepath.Ext(origName), "."),
 	)
 
+	// Create job
 	job, err := createJob(from, to)
 	if err != nil {
 		return FileResult{}, fmt.Errorf("createJob: %w", err)
@@ -534,6 +513,7 @@ func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 		return FileResult{}, fmt.Errorf("export task tidak ditemukan")
 	}
 
+	// Safely extract nested values
 	result, _ := importTask["result"].(map[string]interface{})
 	form, _ := result["form"].(map[string]interface{})
 	formURL, _ := form["url"].(string)
@@ -552,6 +532,7 @@ func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 		return FileResult{}, fmt.Errorf("normalizeServer: %w", err)
 	}
 
+	// Upload chunks
 	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
 	for i := 0; i < totalChunks; i++ {
 		start := int64(i) * chunkSize
@@ -572,6 +553,7 @@ func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 		return FileResult{}, fmt.Errorf("finishUpload: %w", err)
 	}
 
+	// Extract self link
 	links, _ := job["links"].(map[string]interface{})
 	selfURL, _ := links["self"].(string)
 
@@ -580,17 +562,10 @@ func convertImage(fileData []byte, origName, to string) (FileResult, error) {
 		return FileResult{}, fmt.Errorf("pollJob: %w", err)
 	}
 
-	proxyMu.Lock()
-	proxyCache[exportTaskID] = dlURL
-	proxyMu.Unlock()
-
-	proxyURL := fmt.Sprintf("/task/%s/imgs/%s", exportTaskID, outputFilename)
-
-	return FileResult{
-		URL:      dlURL,
-		ProxyURL: proxyURL,
-	}, nil
+	return FileResult{URL: dlURL}, nil
 }
+
+// ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func handleConvert(c *fiber.Ctx) error {
 	to := c.FormValue("to")
@@ -647,94 +622,6 @@ func handleConvert(c *fiber.Ctx) error {
 	})
 }
 
-// handleProxy proxies image from freeconvert CDN
-// Route: GET /:taskId/imgs/:filename
-// Builds: https://server*-*.freeconvert.com/task/:taskId/:filename
-func handleProxy(c *fiber.Ctx) error {
-	taskID := c.Params("taskId")
-	filename := c.Params("filename")
-
-	if taskID == "" || filename == "" {
-		return c.Status(400).JSON(ErrorResponse{
-			"Status": false,
-			"Code":   400,
-			"Error":  "taskId dan filename wajib ada",
-		})
-	}
-
-	// Task ID dari freeconvert punya prefix server di URL aslinya,
-	// kita coba fetch langsung via CDN pattern mereka.
-	// Format URL asli: https://server{N}-{hash}.freeconvert.com/task/{taskId}/{file}
-	// Karena kita tidak tahu server-nya, simpan mapping taskId -> URL di memory.
-	proxyMu.RLock()
-	origin, ok := proxyCache[taskID]
-	proxyMu.RUnlock()
-
-	var targetURL string
-	if ok {
-		// Ganti filename saja (bisa jadi beda dari yang di-cache)
-		parsed, err := url.Parse(origin)
-		if err == nil {
-			parts := strings.Split(parsed.Path, "/")
-			// path: /task/{taskId}/{file}
-			if len(parts) >= 3 {
-				parts[len(parts)-1] = filename
-				parsed.Path = strings.Join(parts, "/")
-				targetURL = parsed.String()
-			}
-		}
-	}
-
-	if targetURL == "" {
-		// Fallback: coba tebak via API task
-		targetURL = fmt.Sprintf("https://www.freeconvert.com/task/%s/%s", taskID, filename)
-	}
-
-	req, _ := http.NewRequest("GET", targetURL, nil)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Referer", "https://www.freeconvert.com/")
-	req.Header.Set("User-Agent", userAgent)
-
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return c.Status(502).JSON(ErrorResponse{
-			"Status": false,
-			"Code":   502,
-			"Error":  "Gagal fetch file dari upstream: " + err.Error(),
-		})
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return c.Status(resp.StatusCode).JSON(ErrorResponse{
-			"Status": false,
-			"Code":   resp.StatusCode,
-			"Error":  fmt.Sprintf("Upstream mengembalikan HTTP %d", resp.StatusCode),
-		})
-	}
-
-	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-
-	c.Set("Content-Type", ct)
-	c.Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, filename))
-	c.Set("Cache-Control", "public, max-age=86400")
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return c.Status(500).JSON(ErrorResponse{
-			"Status": false,
-			"Code":   500,
-			"Error":  "Gagal membaca response upstream",
-		})
-	}
-
-	return c.Status(200).Send(data)
-}
-
 func handleFormats(c *fiber.Ctx) error {
 	normalized := make([]string, 0)
 	seen := map[string]bool{}
@@ -750,9 +637,11 @@ func handleFormats(c *fiber.Ctx) error {
 	})
 }
 
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
 func main() {
 	app := fiber.New(fiber.Config{
-		BodyLimit:    50 * 1024 * 1024,
+		BodyLimit:    50 * 1024 * 1024, // 50MB
 		ReadTimeout:  timeout,
 		WriteTimeout: timeout,
 	})
@@ -760,23 +649,8 @@ func main() {
 	app.Use(logger.New(logger.Config{
 		Format: "[${time}] ${status} ${method} ${path} - ${latency}\n",
 	}))
-	
-	app.Use(cors.New(cors.Config{
-		AllowOrigins: strings.Join([]string{
-			"https://kcast.bani.biz.id",
-			"https://kcast.nvs.my.id",
-			"http://localhost:8080",
-		}, ","),
-		AllowCredentials: true,
-		AllowMethods: "GET,POST,OPTIONS",
-		AllowHeaders: strings.Join([]string{
-			"Origin",
-			"Content-Type",
-			"Accept",
-			"Authorization",
-		}, ","),
-	}))
 
+	// Rate limiter: 25 req per 15 detik per IP
 	app.Use(limiter.New(limiter.Config{
 		Max:        25,
 		Expiration: 15 * time.Second,
@@ -784,7 +658,7 @@ func main() {
 			return c.IP()
 		},
 		LimitReached: func(c *fiber.Ctx) error {
-			return c.Status(429).JSON(ErrorResponse{
+			return c.Status(429).JSON(fiber.Map{
 				"Status": false,
 				"Code":   429,
 				"Error":  "Rate limit tercapai. Maksimal 25 request per 15 detik.",
@@ -793,30 +667,18 @@ func main() {
 	}))
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		response := ImageConverterResponse{
-			Service: "Image Converter API",
-			Version: "1.0.0",
-			Routes: Routes{
-				Convert: RouteDetail{
-					Method: "POST",
-					Desc:   "Convert gambar (form-data: file, to)",
-				},
-				Formats: RouteDetail{
-					Method: "GET",
-					Desc:   "Daftar format yang didukung",
-				},
-				TaskProxy: RouteDetail{
-					Method: "GET",
-					Desc:   "Proxy gambar hasil convert",
-				},
+		return c.JSON(fiber.Map{
+			"service": "Image Converter API",
+			"version": "1.0.0",
+			"routes": fiber.Map{
+				"POST /convert":  "Convert gambar (form-data: file, to)",
+				"GET  /formats":  "Daftar format yang didukung",
 			},
-		}
-		return c.JSON(response)
+		})
 	})
 
 	app.Post("/convert", handleConvert)
 	app.Get("/formats", handleFormats)
-	app.Get("/task/:taskId/imgs/:filename", handleProxy)
 
 	port := os.Getenv("PORT")
 	if port == "" {
